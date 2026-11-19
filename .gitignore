@@ -1,0 +1,47 @@
+# Environment & secrets
+.env
+.env.local
+.env.prod
+infra/.env
+infra/.env.prod
+infra/safeline/.env
+app/.env.local
+
+# Private keys & credentials
+*.pem
+*.key
+*.jks
+secrets/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build & dist
+.next/
+out/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+
+# Docker
+.docker/
+
+# Superpowers workspace (temporary)
+.superpowers/

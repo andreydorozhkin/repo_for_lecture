@@ -1,0 +1,208 @@
+// Dev:  node infra/scripts/gen-keys.mjs [--force]
+//       writes infra/.env and app/.env.local
+// Prod: node infra/scripts/gen-keys.mjs --prod --app-url https://app.example.com --api-url https://api.example.com --sonar-url https://sonar.example.com [--force]
+//       writes infra/.env.prod and infra/safeline/.env; SMTP_* stay empty and must be filled in by hand
+import { createHmac, randomBytes } from "node:crypto";
+import { existsSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const { values: args } = parseArgs({
+  options: {
+    force: { type: "boolean", default: false },
+    prod: { type: "boolean", default: false },
+    "app-url": { type: "string" },
+    "api-url": { type: "string" },
+    "sonar-url": { type: "string" },
+    "safeline-dir": { type: "string", default: "/data/safeline" },
+  },
+});
+
+const infraDir = join(dirname(fileURLToPath(import.meta.url)), "..");
+const targets = args.prod
+  ? { env: join(infraDir, ".env.prod"), safeline: join(infraDir, "safeline", ".env") }
+  : { env: join(infraDir, ".env"), app: join(infraDir, "..", "app", ".env.local") };
+
+for (const path of Object.values(targets)) {
+  if (existsSync(path) && !args.force) {
+    console.error(`${path} already exists. Re-run with --force to replace it.`);
+    process.exit(1);
+  }
+}
+
+function httpsUrl(name) {
+  const raw = args[name];
+  if (!raw) {
+    console.error(`--${name} is required with --prod`);
+    process.exit(1);
+  }
+  const url = new URL(raw);
+  if (url.protocol !== "https:") {
+    console.error(`--${name} must be an https:// URL`);
+    process.exit(1);
+  }
+  return url.origin;
+}
+
+const secret = (bytes) => randomBytes(bytes).toString("base64url");
+const hex = (bytes) => randomBytes(bytes).toString("hex");
+const alnum = (length) => {
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  return Array.from(randomBytes(length), (byte) => alphabet[byte % alphabet.length]).join("");
+};
+
+const jwtSecret = secret(48);
+
+function signJwt(role) {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(
+    JSON.stringify({
+      role,
+      iss: "supabase",
+      iat: issuedAt,
+      exp: issuedAt + 60 * 60 * 24 * 365 * 5,
+    }),
+  ).toString("base64url");
+  const data = `${header}.${payload}`;
+  const signature = createHmac("sha256", jwtSecret).update(data).digest("base64url");
+  return `${data}.${signature}`;
+}
+
+const anonKey = signJwt("anon");
+const serviceRoleKey = signJwt("service_role");
+
+const appUrl = args.prod ? httpsUrl("app-url") : "http://localhost:3000";
+const apiUrl = args.prod ? httpsUrl("api-url") : "http://localhost:8000";
+const sonarUrl = args.prod ? httpsUrl("sonar-url") : "";
+
+const values = {
+  POSTGRES_PASSWORD: secret(24),
+  JWT_SECRET: jwtSecret,
+  ANON_KEY: anonKey,
+  SERVICE_ROLE_KEY: serviceRoleKey,
+  DASHBOARD_USERNAME: "supabase",
+  DASHBOARD_PASSWORD: secret(18),
+  SECRET_KEY_BASE: secret(48),
+  REALTIME_DB_ENC_KEY: hex(8),
+  PG_META_CRYPTO_KEY: secret(24),
+  S3_PROTOCOL_ACCESS_KEY_ID: hex(16),
+  S3_PROTOCOL_ACCESS_KEY_SECRET: hex(32),
+  SONAR_DB_PASSWORD: secret(18),
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: anonKey,
+  POSTGRES_HOST: "db",
+  POSTGRES_DB: "postgres",
+  POSTGRES_PORT: "5432",
+  SUPABASE_PUBLIC_URL: apiUrl,
+  API_EXTERNAL_URL: `${apiUrl}/auth/v1`,
+  SITE_URL: appUrl,
+  ADDITIONAL_REDIRECT_URLS: args.prod ? appUrl : "",
+  JWT_EXPIRY: "3600",
+  DISABLE_SIGNUP: "false",
+  ENABLE_EMAIL_SIGNUP: "true",
+  ENABLE_EMAIL_AUTOCONFIRM: args.prod ? "false" : "true",
+  ENABLE_PHONE_SIGNUP: "false",
+  ENABLE_PHONE_AUTOCONFIRM: "false",
+  ENABLE_ANONYMOUS_USERS: "false",
+  SMTP_ADMIN_EMAIL: args.prod ? "" : "admin@example.com",
+  SMTP_HOST: args.prod ? "" : "localhost",
+  SMTP_PORT: args.prod ? "" : "2500",
+  SMTP_USER: args.prod ? "" : "fake_mail_user",
+  SMTP_PASS: args.prod ? "" : "fake_mail_password",
+  SMTP_SENDER_NAME: args.prod ? "" : "local",
+  MAILER_URLPATHS_CONFIRMATION: "/auth/v1/verify",
+  MAILER_URLPATHS_INVITE: "/auth/v1/verify",
+  MAILER_URLPATHS_RECOVERY: "/auth/v1/verify",
+  MAILER_URLPATHS_EMAIL_CHANGE: "/auth/v1/verify",
+  STUDIO_DEFAULT_ORGANIZATION: "Default Organization",
+  STUDIO_DEFAULT_PROJECT: "Default Project",
+  OPENAI_API_KEY: "",
+  PGRST_DB_SCHEMAS: "public",
+  PGRST_DB_MAX_ROWS: "1000",
+  PGRST_DB_EXTRA_SEARCH_PATH: "public",
+  FUNCTIONS_VERIFY_JWT: "true",
+  FUNCTIONS_MEMORY_LIMIT: "1g",
+  KONG_HTTP_PORT: "8000",
+  GLOBAL_S3_BUCKET: "stub",
+  REGION: "local",
+  STORAGE_TENANT_ID: "stub",
+  IMGPROXY_AUTO_WEBP: "true",
+  NEXT_PUBLIC_SUPABASE_URL: apiUrl,
+  SUPABASE_INTERNAL_URL: "http://kong:8000",
+  APP_PORT: "3000",
+  SONAR_PORT: "9000",
+  ...(args.prod ? { SONAR_PUBLIC_URL: sonarUrl } : {}),
+};
+
+function envFile(header, entries) {
+  return [...header.map((line) => `# ${line}`), ...Object.entries(entries).map(([k, v]) => `${k}=${v}`), ""].join("\n");
+}
+
+if (args.prod) {
+  writeFileSync(
+    targets.env,
+    envFile(
+      [
+        "Generated by infra/scripts/gen-keys.mjs --prod. Do not commit this file.",
+        "Fill in SMTP_*: production sign-up sends real confirmation emails.",
+      ],
+      values,
+    ),
+    { mode: 0o600 },
+  );
+
+  const archSuffix = process.arch === "arm64" ? "-arm" : "";
+  const safeline = {
+    SAFELINE_DIR: args["safeline-dir"],
+    IMAGE_TAG: "9.4.5",
+    IMAGE_PREFIX: "chaitin",
+    REGION: "-g",
+    ARCH_SUFFIX: archSuffix,
+    RELEASE: "",
+    CHANNEL: "",
+    POSTGRES_IMAGE: `chaitin/safeline-postgres${archSuffix}:15.18`,
+    POSTGRES_PASSWORD: alnum(24),
+    SUBNET_PREFIX: "10.222.222",
+    MGT_PORT: "9443",
+    MGT_PROXY: "0",
+    DETECTOR_MGMT_TOKEN: hex(32),
+    DETECTOR_MGMT_AUTH: "on",
+    DETECTOR_UPDATE_VERIFY: "on",
+    DETECTOR_UPDATE_PUBLIC_KEY: "",
+    DETECTOR_AES_KEY: alnum(16),
+    MGT_INTERNAL_TOKEN: hex(32),
+    MGT_LICENSE_INTEGRITY_KEY: hex(32),
+  };
+  writeFileSync(
+    targets.safeline,
+    envFile(
+      [
+        "Generated by infra/scripts/gen-keys.mjs --prod. Do not commit this file.",
+        "Separate from infra/.env.prod: SafeLine's compose also uses POSTGRES_PASSWORD.",
+        "ARCH_SUFFIX matches the machine that ran this script; set it to empty on an amd64 server.",
+      ],
+      safeline,
+    ),
+    { mode: 0o600 },
+  );
+
+  console.log("Wrote infra/.env.prod and infra/safeline/.env");
+  console.log("Next: fill SMTP_* in infra/.env.prod, then npm run up:prod && npm run waf:up");
+} else {
+  writeFileSync(targets.env, envFile(["Generated by infra/scripts/gen-keys.mjs. Local development only.", "Do not commit this file."], values), {
+    mode: 0o600,
+  });
+  writeFileSync(
+    targets.app,
+    envFile(
+      [
+        "Generated by infra/scripts/gen-keys.mjs for npm run dev on the host.",
+        "Inside Docker Compose the app service gets SUPABASE_INTERNAL_URL=http://kong:8000.",
+      ],
+      { NEXT_PUBLIC_SUPABASE_URL: apiUrl, NEXT_PUBLIC_SUPABASE_ANON_KEY: anonKey },
+    ),
+    { mode: 0o600 },
+  );
+  console.log("Wrote infra/.env and app/.env.local");
+}
